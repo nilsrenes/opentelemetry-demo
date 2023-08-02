@@ -8,11 +8,6 @@ x-default-logging: &logging
     max-size: "5m"
     max-file: "2"
 
-networks:
-  default:
-    name: opentelemetry-demo
-    driver: bridge
-
 services:
   # ******************
   # Core Demo Services
@@ -840,3 +835,177 @@ services:
       retries: 60
     ports:
       - 5432
+
+# Elastic stack
+  apm-server:
+    image: docker.elastic.co/apm/apm-server:${ELASTICSEARCH_VERSION}
+    depends_on:
+      - elasticsearch
+      - kibana
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    cap_drop: ["ALL"]
+    networks:
+    - opentelemetry-demo
+    command: >
+       apm-server -e
+         -E apm-server.rum.enabled=true
+         -E setup.kibana.host=kibana:5601
+         -E setup.template.settings.index.number_of_replicas=0
+         -E apm-server.kibana.enabled=true
+         -E apm-server.kibana.host=kibana:5601
+         -E output.elasticsearch.hosts=["elasticsearch:9200"]
+    healthcheck:
+      interval: 10s
+      retries: 12
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
+
+  apm-server-secure:
+    image: docker.elastic.co/apm/apm-server:${ELASTICSEARCH_VERSION}
+    depends_on:
+      - elasticsearch
+      - kibana
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    cap_drop: ["ALL"]
+    ports:
+      - 8200:8200
+    networks:
+      - opentelemetry-demo
+    command: >
+      apm-server -e
+        -E apm-server.rum.enabled=true
+        -E setup.kibana.host=kibana:5601
+        -E setup.template.settings.index.number_of_replicas=0
+        -E apm-server.kibana.enabled=true
+        -E apm-server.kibana.host=kibana:5601
+        -E output.elasticsearch.hosts=["elasticsearch:9200"]
+        -E apm-server.auth.anonymous.rate_limit.event_limit=300
+        -E apm-server.auth.anonymous.rate_limit.ip_limit=1000
+        -E apm-server.auth.anonymous.allow_service=angular-app
+        -E elasticsearch.password=${ELASTIC_PASSWORD}
+
+    healthcheck:
+      interval: 10s
+      retries: 12
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTICSEARCH_VERSION}
+    environment:
+    - bootstrap.memory_lock=true
+    - cluster.name=docker-cluster
+    - cluster.routing.allocation.disk.threshold_enabled=false
+    - discovery.type=single-node
+    - ES_JAVA_OPTS=-XX:UseAVX=2 -Xms1g -Xmx1g
+    - xpack.security.enabled=true
+    - xpack.security.transport.ssl.enabled=true
+    - xpack.security.transport.ssl.keystore.type=PKCS12
+    - xpack.security.transport.ssl.verification_mode=certificate
+    - xpack.security.transport.ssl.keystore.path=elastic-certificates.p12
+    - xpack.security.transport.ssl.truststore.path=elastic-certificates.p12
+    - xpack.security.transport.ssl.truststore.type=PKCS12
+    - xpack.security.authc.api_key.enabled=true
+    ulimits:
+      memlock:
+        hard: -1
+        soft: -1
+    volumes:
+    - ./cert/elastic-certificates.p12:/usr/share/elasticsearch/config/elastic-certificates.p12
+    - ./esdata:/usr/share/elasticsearch/data
+    ports:
+    - 9200:9200
+    networks:
+    - opentelemetry-demo
+    healthcheck:
+      interval: 20s
+      retries: 10
+      test: curl -s http://localhost:9200/_cluster/health | grep -vq '"status":"red"'
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTICSEARCH_VERSION}
+    depends_on:
+      - elasticsearch
+    environment:
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana
+      - ELASTICSEARCH_PASSWORD="${KIBANA_PASSWORD}"
+        #- XPACK_FLEET_AGENTS_FLEET_SERVER_HOSTS="http://fleet-server:8220"
+        #- XPACK_FLEET_AGENTS_ELASTICSEARCH_HOSTS="http://elasticsearch:9200"
+    ports:
+    - 5601:5601
+    networks:
+    - opentelemetry-demo
+    healthcheck:
+      interval: 10s
+      retries: 20
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:5601/api/status
+    restart: on-failure
+
+  fleet-server:
+    image: docker.elastic.co/beats/elastic-agent:${ELASTICSEARCH_VERSION}
+    ports:
+    - 8220:8220
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -k https://localhost:8220/api/status | grep -q 'HEALTHY'"]
+      retries: 300
+      interval: 1s
+    environment:
+      - FLEET_SERVER_ENABLE="1"
+      - FLEET_SERVER_ELASTICSEARCH_USERNAME="elastic"
+      - FLEET_SERVER_ELASTICSEARCH_PASSWORD="${ELASTIC_PASSWORD}"
+      - FLEET_SERVER_ES=http://elasticsearch:9200 
+      - FLEET_SERVER_SERVICE_TOKEN=AAEAAWVsYXN0aWMvZmxlZXQtc2VydmVyL3Rva2VuLTE2OTA5OTk1ODcyODg6Rkgxa1Qybi1UdG13ejNzMHBFdHVfZw
+      - FLEET_SERVER_POLICY=fleet-server-policy 
+        #FLEET_SERVER_CERT: /etc/pki/tls/certs/fleet-server.pem
+        #FLEET_SERVER_CERT_KEY: /etc/pki/tls/private/fleet-server-key.pem
+        #- FLEET_URL="http://fleet-server:8220"
+        #- KIBANA_FLEET_SETUP="true"
+        #- KIBANA_FLEET_HOST="http://kibana:5601"
+        #- KIBANA_FLEET_USERNAME="elastic"
+        #- KIBANA_FLEET_PASSWORD="${ELASTIC_PASSWORD}"
+        #depends_on:
+        #- elasticsearch
+        #- kibana
+      #    volumes:
+      #- "./testing/docker/fleet-server/certificate.pem:/etc/pki/tls/certs/fleet-server.pem"
+      #- "./testing/docker/fleet-server/key.pem:/etc/pki/tls/private/fleet-server-key.pem"
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTICSEARCH_VERSION}
+    user: root
+    networks:
+      - opentelemetry-demo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/containers/:/var/lib/docker/containers/:ro
+      - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+    environment:
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - KIBANA_HOST=kibana
+    command: ["--strict.perms=false"]
+      #restart: on-failure
+
+  metricbeat:
+    image: docker.elastic.co/beats/metricbeat:${ELASTICSEARCH_VERSION}
+    user: root
+    networks:
+      - opentelemetry-demo
+    volumes:
+      - /proc:/hostfs/proc:ro
+      - /sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro
+      - /:/hostfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
+    environment:
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - KIBANA_HOST=kibana
+    command: ["--strict.perms=false", "-system.hostfs=/hostfs"]
+      #    restart: on-failure
+
+volumes:
+  esdata:
+    driver: local
+
+networks:
+  opentelemetry-demo:
+    driver: bridge

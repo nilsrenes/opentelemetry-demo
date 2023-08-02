@@ -1,0 +1,50 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+# extra settings to be merged into OpenTelemetry Collector configuration
+# do not delete this file
+#
+
+extensions:
+ bearertokenauth/client:
+   token: "YOUR_TOKEN"
+
+receivers:
+ otlp:
+   protocols:
+     grpc:
+     http:
+ hostmetrics:
+   collection_interval: 10s
+   scrapers:
+     load:
+     memory:
+     network:
+
+exporters:
+ otlp/elastic:
+   endpoint: "YOUR_ENDPOINT"
+   auth:
+     authenticator: bearertokenauth/client
+
+processors:
+ resource:
+   attributes:
+     - key: deployment.environment
+       action: insert
+       value: production
+
+service:
+ extensions: [bearertokenauth/client]
+ pipelines:
+   traces:
+     receivers: [otlp]
+     processors: [resource]
+     exporters: [otlp/elastic]
+   metrics:
+     receivers: [otlp,hostmetrics]
+     processors: [resource]
+     exporters: [otlp/elastic]
+   logs:
+     receivers: [otlp]
+     processors: [resource]
+     exporters: [otlp/elastic]
