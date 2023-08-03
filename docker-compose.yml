@@ -837,10 +837,50 @@ services:
       - 5432
 
 # Elastic stack
+#
+#
+
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTICSEARCH_VERSION}
+    environment:
+      - bootstrap.memory_lock=true
+      - node.name=es01
+      - discovery.type=single-node
+        #- ELASTIC_PASSWORD=$ELASTIC_PASSWORD
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.license.self_generated.type=trial
+      - xpack.security.enabled=true
+      - xpack.security.authc.api_key.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=$CERTS_DIR/es01/es01.key
+      - xpack.security.http.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.http.ssl.certificate=$CERTS_DIR/es01/es01.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.security.transport.ssl.certificate_authorities=$CERTS_DIR/ca/ca.crt
+      - xpack.security.transport.ssl.certificate=$CERTS_DIR/es01/es01.crt
+      - xpack.security.transport.ssl.key=$CERTS_DIR/es01/es01.key
+        #- xpack.security.enrollment.enabled=true
+    ulimits:
+      memlock:
+        hard: -1
+        soft: -1
+    volumes:
+    - ./certs:/usr/share/elasticsearch/config/certs
+    - ./esdata:/usr/share/elasticsearch/data
+    ports:
+    - 9200:9200
+    networks:
+    - opentelemetry-demo
+    healthcheck:
+      interval: 20s
+      retries: 10
+      test: curl -s http://localhost:9200/_cluster/health | grep -vq '"status":"red"'
+
   apm-server:
     image: docker.elastic.co/apm/apm-server:${ELASTICSEARCH_VERSION}
     depends_on:
-      - elasticsearch
+      - es01
       - kibana
     cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
     cap_drop: ["ALL"]
@@ -853,7 +893,7 @@ services:
          -E setup.template.settings.index.number_of_replicas=0
          -E apm-server.kibana.enabled=true
          -E apm-server.kibana.host=kibana:5601
-         -E output.elasticsearch.hosts=["elasticsearch:9200"]
+         -E output.elasticsearch.hosts=["es01:9200"]
     healthcheck:
       interval: 10s
       retries: 12
@@ -862,7 +902,7 @@ services:
   apm-server-secure:
     image: docker.elastic.co/apm/apm-server:${ELASTICSEARCH_VERSION}
     depends_on:
-      - elasticsearch
+      - es01
       - kibana
     cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
     cap_drop: ["ALL"]
@@ -877,7 +917,7 @@ services:
         -E setup.template.settings.index.number_of_replicas=0
         -E apm-server.kibana.enabled=true
         -E apm-server.kibana.host=kibana:5601
-        -E output.elasticsearch.hosts=["elasticsearch:9200"]
+        -E output.elasticsearch.hosts=["es01:9200"]
         -E apm-server.auth.anonymous.rate_limit.event_limit=300
         -E apm-server.auth.anonymous.rate_limit.ip_limit=1000
         -E apm-server.auth.anonymous.allow_service=angular-app
@@ -888,53 +928,29 @@ services:
       retries: 12
       test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
 
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTICSEARCH_VERSION}
-    environment:
-    - bootstrap.memory_lock=true
-    - cluster.name=docker-cluster
-    - cluster.routing.allocation.disk.threshold_enabled=false
-    - discovery.type=single-node
-    - ES_JAVA_OPTS=-XX:UseAVX=2 -Xms1g -Xmx1g
-    - xpack.security.enabled=true
-    - xpack.security.transport.ssl.enabled=true
-    - xpack.security.transport.ssl.keystore.type=PKCS12
-    - xpack.security.transport.ssl.verification_mode=certificate
-    - xpack.security.transport.ssl.keystore.path=elastic-certificates.p12
-    - xpack.security.transport.ssl.truststore.path=elastic-certificates.p12
-    - xpack.security.transport.ssl.truststore.type=PKCS12
-    - xpack.security.authc.api_key.enabled=true
-    ulimits:
-      memlock:
-        hard: -1
-        soft: -1
-    volumes:
-    - ./cert/elastic-certificates.p12:/usr/share/elasticsearch/config/elastic-certificates.p12
-    - ./esdata:/usr/share/elasticsearch/data
-    ports:
-    - 9200:9200
-    networks:
-    - opentelemetry-demo
-    healthcheck:
-      interval: 20s
-      retries: 10
-      test: curl -s http://localhost:9200/_cluster/health | grep -vq '"status":"red"'
-
   kibana:
     image: docker.elastic.co/kibana/kibana:${ELASTICSEARCH_VERSION}
     depends_on:
-      - elasticsearch
+      - es01
     environment:
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-      - ELASTICSEARCH_USERNAME=kibana
-      - ELASTICSEARCH_PASSWORD="${KIBANA_PASSWORD}"
+      - ELASTICSEARCH_HOSTS=https//es01:9200
+        #- ELASTICSEARCH_USERNAME=kibana_system
+        #- ELASTICSEARCH_PASSWORD="${ELASTIC_PASSWORD}"
         #- XPACK_FLEET_AGENTS_FLEET_SERVER_HOSTS="http://fleet-server:8220"
         #- XPACK_FLEET_AGENTS_ELASTICSEARCH_HOSTS="http://elasticsearch:9200"
+      - XPACK_SECURITY_ENABLED=true
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      - ELASTICSEARCH_SSL_VERIFICATIONMODE=certificate
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_KEY=config/certs/kibana/kibana.key
+      - SERVER_SSL_CERTIFICATE=config/certs/kibana/kibana.crt
+      #- xpack.monitoring.elasticsearch.ssl.verificationMode=certificate
     ports:
     - 5601:5601
     networks:
     - opentelemetry-demo
+    volumes:
+    - ./certs:/usr/share/kibana/config/certs
     healthcheck:
       interval: 10s
       retries: 20
@@ -953,7 +969,7 @@ services:
       - FLEET_SERVER_ENABLE="1"
       - FLEET_SERVER_ELASTICSEARCH_USERNAME="elastic"
       - FLEET_SERVER_ELASTICSEARCH_PASSWORD="${ELASTIC_PASSWORD}"
-      - FLEET_SERVER_ES=http://elasticsearch:9200 
+      - FLEET_SERVER_ES=http://es01:9200 
       - FLEET_SERVER_SERVICE_TOKEN=AAEAAWVsYXN0aWMvZmxlZXQtc2VydmVyL3Rva2VuLTE2OTA5OTk1ODcyODg6Rkgxa1Qybi1UdG13ejNzMHBFdHVfZw
       - FLEET_SERVER_POLICY=fleet-server-policy 
         #FLEET_SERVER_CERT: /etc/pki/tls/certs/fleet-server.pem
@@ -980,7 +996,7 @@ services:
       - /var/lib/docker/containers/:/var/lib/docker/containers/:ro
       - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
     environment:
-      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - ELASTICSEARCH_HOST=http://s01:9200
       - KIBANA_HOST=kibana
     command: ["--strict.perms=false"]
       #restart: on-failure
@@ -997,13 +1013,15 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
     environment:
-      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - ELASTICSEARCH_HOST=http://es01:9200
       - KIBANA_HOST=kibana
     command: ["--strict.perms=false", "-system.hostfs=/hostfs"]
       #    restart: on-failure
 
 volumes:
   esdata:
+    driver: local
+  certs:
     driver: local
 
 networks:
